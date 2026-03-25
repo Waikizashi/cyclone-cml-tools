@@ -1,0 +1,84 @@
+{
+  "name": "cyclone-cml-tools",
+  "displayName": "Cyclone CML Tools",
+  "description": "Navigation, hover, diagnostics and workspace indexing for Cyclone .type/.tpl/.mdl/.smdl/.xhtml.tpl/.body/.L10n files.",
+  "version": "0.1.0",
+  "publisher": "waikizashi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/waikizashi/cyclone-cml-tools.git"
+  },
+  "homepage": "https://github.com/waikizashi/cyclone-cml-tools",
+  "bugs": {
+    "url": "https://github.com/waikizashi/cyclone-cml-tools/issues"
+  },
+  "engines": {
+    "vscode": "^1.107.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "cyclone",
+    "cml",
+    "tpl",
+    "mdl",
+    "type",
+    "l10n"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "workspaceContains:**/_type/*.type",
+    "workspaceContains:**/_mdl/*.tpl",
+    "workspaceContains:**/_mdl/*.mdl",
+    "workspaceContains:**/_mdl/*.smdl",
+    "workspaceContains:**/_dsgn/*.xhtml.tpl"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "tpl",
+        "aliases": [
+          "Cyclone TPL"
+        ],
+        "extensions": [
+          ".tpl",
+          ".body",
+          ".xsgn"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tpl",
+        "scopeName": "source.tpl",
+        "path": "./syntaxes/tpl.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.js": "javascript",
+          "text.html.basic": "html"
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "cycloneCmlTools.reindexWorkspace",
+        "title": "Cyclone CML: Reindex Workspace"
+      },
+      {
+        "command": "cycloneCmlTools.openResolvedTarget",
+        "title": "Cyclone CML: Open Resolved Target"
+      }
+    ]
+  },
+  "scripts": {
+    "package:vsix": "bash ./scripts/package-vsix.sh",
+    "smoke:test": "node ./scripts/smoke-test.js"
+  }
+}

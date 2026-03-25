@@ -1,0 +1,40 @@
+{
+  "comments": {
+    "lineComment": "#",
+    "blockComment": [
+      "[%#",
+      "%]"
+    ]
+  },
+  "brackets": [
+    ["{", "}"],
+    ["(", ")"],
+    ["[", "]"],
+    ["<", ">"],
+    ["[%", "%]"],
+    ["<!\\[CDATA\\[", "\\]\\]>"]
+  ],
+  "autoClosingPairs": [
+    { "open": "{", "close": "}" },
+    { "open": "(", "close": ")" },
+    { "open": "[", "close": "]" },
+    { "open": "[%", "close": "%]" },
+    { "open": "\"", "close": "\"", "notIn": ["string"] },
+    { "open": "'", "close": "'", "notIn": ["string"] },
+    { "open": "<!--", "close": "-->" },
+    { "open": "<!\\[CDATA\\[", "close": "\\]\\]>" }
+  ],
+  "surroundingPairs": [
+    ["{", "}"],
+    ["(", ")"],
+    ["[", "]"],
+    ["<", ">"],
+    ["\"", "\""],
+    ["'", "'"],
+    ["[%", "%]"],
+    ["<!\\[CDATA\\[", "\\]\\]>"]
+  ],
+  "colorizedBracketPairs": [
+    ["<!\\[CDATA\\[", "\\]\\]>"]
+  ]
+}

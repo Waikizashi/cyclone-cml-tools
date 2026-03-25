@@ -1,0 +1,217 @@
+{
+  "name": "TPL",
+  "scopeName": "source.tpl",
+  "fileTypes": [
+    "tpl",
+    "body",
+    "xsgn"
+  ],
+  "patterns": [
+    {
+      "name": "meta.tag.script.tpl",
+      "begin": "<script\\b[^>]*>",
+      "beginCaptures": {
+        "0": {
+          "name": "entity.name.tag.script.html"
+        }
+      },
+      "end": "</script\\s*>",
+      "endCaptures": {
+        "0": {
+          "name": "entity.name.tag.script.html"
+        }
+      },
+      "contentName": "source.js",
+      "patterns": [
+        {
+          "include": "source.js"
+        }
+      ]
+    },
+    {
+      "name": "cdata.section.tpl",
+      "begin": "<!\\[CDATA\\[",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.cdata.begin.tpl"
+        }
+      },
+      "end": "\\]\\]>",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.cdata.end.tpl"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#tplBlock"
+        },
+        {
+          "include": "#tmpTag"
+        },
+        {
+          "include": "text.html.basic"
+        }
+      ],
+      "contentName": "text.html.basic"
+    },
+    {
+      "include": "#tplBlock"
+    },
+    {
+      "include": "#tmpTag"
+    },
+    {
+      "include": "text.html.basic"
+    }
+  ],
+  "injections": {
+    "L:string.quoted.double.html, L:string.quoted.single.html, L:text.html.basic - comment": {
+      "patterns": [
+        {
+          "include": "#tplBlock"
+        }
+      ]
+    }
+  },
+  "repository": {
+    "tplBlock": {
+      "patterns": [
+        {
+          "name": "meta.embedded.block.tpl",
+          "begin": "\\[%(?!%)",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.embedded.begin.tpl"
+            }
+          },
+          "end": "%\\]",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.embedded.end.tpl"
+            }
+          },
+          "contentName": "source.perl",
+          "patterns": [
+            {
+              "name": "string.quoted.double.tt2",
+              "begin": "\"",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.begin.tt2"
+                }
+              },
+              "end": "\"|(?=%\\])",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.end.tt2"
+                }
+              },
+              "patterns": [
+                {
+                  "match": "\\\\.",
+                  "name": "constant.character.escape.tt2"
+                }
+              ]
+            },
+            {
+              "name": "string.quoted.single.tt2",
+              "begin": "'",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.begin.tt2"
+                }
+              },
+              "end": "'|(?=%\\])",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.definition.string.end.tt2"
+                }
+              },
+              "patterns": [
+                {
+                  "match": "\\\\.",
+                  "name": "constant.character.escape.tt2"
+                }
+              ]
+            },
+            {
+              "name": "comment.line.number-sign.tpl",
+              "begin": "#",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.definition.comment.tpl"
+                }
+              },
+              "end": "(?=%\\])|$"
+            },
+            {
+              "name": "keyword.import.package.tt2",
+              "match": "(?i)\\s+(?:a\\d{2,5}|Dumper|Math|Date|DATE|L10n|Debug|SQL|Document|JSON|Curl)\\b"
+            },
+            {
+              "name": "support.class.package.tt2",
+              "match": "(?i)\\b(?:a\\d{2,5}|Dumper|Math|Date|DATE|L10n|Debug|SQL|Document|JSON|Curl)\\b"
+            },
+            {
+              "name": "keyword.control.directive.tt2",
+              "match": "(?i)\\b(END|IF|ELSIF|ELSE|UNLESS|FOREACH|WHILE|SWITCH|CASE|DEFAULT|TRY|CATCH|FINAL|THROW|RETURN|NEXT|LAST|INCLUDE|PROCESS|INSERT|WRAPPER|BLOCK|MACRO|FILTER|CALL|SET|LET|GET|USE)\\b"
+            },
+            {
+              "name": "keyword.other.in.tt2",
+              "match": "(?i)\\bIN\\b"
+            },
+            {
+              "name": "support.function.filter.tt2",
+              "match": "\\|\\s*[A-Za-z_][\\w]*"
+            },
+            {
+              "name": "meta.hash.assignment.tt2",
+              "begin": "((?:\\$?[A-Za-z_][\\w]*|\"[^\"]+\"|'[^']+'))\\s*(=)",
+              "beginCaptures": {
+                "1": {
+                  "name": "variable.other.key.tt2"
+                },
+                "2": {
+                  "name": "keyword.operator.assignment.tt2"
+                }
+              },
+              "end": "(?=,|\\)|\\]|\\}|;|\\n|%\\])",
+              "patterns": [
+                  {
+                    "name": "support.class.package.tt2",
+                    "match": "(?i)\\b(?:a\\d{2,5}|Dumper|Math|Date|DATE|L10n|Debug|SQL|Document|JSON|Curl)\\b"
+                  },
+                  {
+                    "name": "variable.other.member.tt2",
+                    "match": "(?<=\\.)[A-Za-z_]\\w*"
+                  },
+                  { "include": "source.perl" }
+                ]
+            },
+            {
+              "name": "variable.other.member.tt2",
+              "match": "(?<=\\.)[A-Za-z_]\\w*"
+            },
+            {
+              "name": "variable.other.member.tt2",
+              "match": "\\.[A-Za-z_][A-Za-z0-9_]*"
+            },
+            {
+              "include": "source.perl"
+            }
+          ]
+        }
+      ]
+    },
+    "tmpTag": {
+      "patterns": [
+        {
+          "name": "keyword.other.tmp-tag.tpl",
+          "match": "(?i)<!TMP-[A-Z0-9_-]+!>"
+        }
+      ]
+    }
+  },
+  "uuid": "b6f2a2e4-7c7c-4c6a-9bd9-6f6d2a2d9f00"
+}
