@@ -9,9 +9,21 @@ var TEMPLATE_PATTERNS = ['**/*.tpl', '**/*.body', '**/*.L10n'];
 var PERL_PATTERNS = ['**/*.mdl', '**/*.smdl'];
 var NAVIGATION_PATTERNS = TYPE_PATTERNS.concat(TEMPLATE_PATTERNS, PERL_PATTERNS);
 var CODELENS_PATTERNS = TYPE_PATTERNS.concat(['**/*.tpl', '**/*.body'], PERL_PATTERNS);
+var WATCH_PATTERNS = NAVIGATION_PATTERNS.concat(['**/master.conf', '**/local.conf']);
 var SEMANTIC_TOKEN_TYPES = ['function', 'property', 'parameter', 'variable'];
 var SEMANTIC_TOKEN_MODIFIERS = ['readonly', 'declaration'];
+var COMPLETION_TRIGGER_CHARS = ['.', '\'', '"', '_'].concat('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''));
 var semanticLegend = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS);
+var TT2_KEYWORD_SET = Object.create(null);
+
+[
+  'AND', 'BLOCK', 'BREAK', 'CALL', 'CASE', 'CATCH', 'DEFAULT', 'ELSIF', 'ELSE', 'END', 'FILTER', 'FINAL',
+  'FOR', 'FOREACH', 'GET', 'IF', 'IN', 'INCLUDE', 'INSERT', 'LAST', 'MACRO', 'META', 'NEXT', 'NOT', 'OR',
+  'PERL', 'PROCESS', 'RAWPERL', 'RETURN', 'SET', 'STOP', 'SWITCH', 'TAGS', 'THROW', 'TRY', 'UNLESS', 'USE',
+  'WHILE', 'WRAPPER'
+].forEach(function (keyword) {
+  TT2_KEYWORD_SET[keyword] = true;
+});
 
 function isNavigableModuleAttrId(attrId) {
   return attrId === '-name' || attrId === '-tpl' || attrId === '-TMP';
@@ -78,6 +90,59 @@ function buildPathCompletionItems(position, typedPath, labels, kind, detail) {
   });
 }
 
+function buildNamespaceCompletionItems(position, typedNamespace, labels, kind, detail) {
+  var fullPath = typedNamespace || '';
+  var separatorIndex = fullPath.lastIndexOf('::');
+  var partial = separatorIndex === -1 ? fullPath : fullPath.slice(separatorIndex + 2);
+  var replaceRange = new vscode.Range(position.translate(0, -partial.length), position);
+
+  return (labels || []).map(function (label) {
+    var item = new vscode.CompletionItem(label, kind);
+    item.detail = detail;
+    item.range = replaceRange;
+    item.insertText = label;
+    return item;
+  });
+}
+
+function collectNamespaceSuggestions(keys, typedNamespace) {
+  var fullPath = typedNamespace || '';
+  var separatorIndex = fullPath.lastIndexOf('::');
+  var baseNamespace = separatorIndex === -1 ? '' : fullPath.slice(0, separatorIndex + 2);
+  var partial = separatorIndex === -1 ? fullPath : fullPath.slice(separatorIndex + 2);
+  var seen = Object.create(null);
+  var result = [];
+
+  (keys || []).forEach(function (key) {
+    var remainder = '';
+    var nextSegment = '';
+
+    if (baseNamespace) {
+      if (key.indexOf(baseNamespace) !== 0) {
+        return;
+      }
+      remainder = key.slice(baseNamespace.length);
+    } else {
+      remainder = key;
+    }
+
+    nextSegment = remainder.split('.')[0];
+    if (!nextSegment) {
+      return;
+    }
+    if (partial && nextSegment.indexOf(partial) !== 0) {
+      return;
+    }
+    if (seen[nextSegment]) {
+      return;
+    }
+    seen[nextSegment] = true;
+    result.push(nextSegment);
+  });
+
+  return result.sort();
+}
+
 function activate(context) {
   if (!vscode.workspace.workspaceFolders || !vscode.workspace.workspaceFolders.length) {
     return;
@@ -94,6 +159,8 @@ function activate(context) {
     queued: false,
     readyPromise: Promise.resolve()
   };
+  var documentParseCache = new Map();
+  var indexRevision = 0;
 
   function normalizeRelPath(fsPath) {
     return path.relative(rootPath, fsPath).replace(/\\/g, '/');
@@ -107,11 +174,16 @@ function activate(context) {
   }
 
   function parseCurrentDocument(document) {
+    var cacheKey = document.uri.toString();
+    var cached = documentParseCache.get(cacheKey);
+    if (cached && cached.version === document.version) {
+      return cached.parsed;
+    }
+
     var relPath = normalizeRelPath(document.uri.fsPath);
     var text = document.getText();
     var kind = resolver.detectFileKind(relPath);
-
-    return {
+    var parsed = {
       relPath: relPath,
       kind: kind,
       text: text,
@@ -120,6 +192,13 @@ function activate(context) {
       l10nInfo: kind === 'l10n' ? resolver.parseL10nReferences(text) : null,
       perlInfo: (kind === 'mdl' || kind === 'smdl') ? resolver.parsePerlReferences(text) : null
     };
+
+    documentParseCache.set(cacheKey, {
+      version: document.version,
+      parsed: parsed
+    });
+
+    return parsed;
   }
 
   function positionRangeFromOffsets(document, start, end) {
@@ -167,6 +246,177 @@ function activate(context) {
     return normalizeRelPath(absPath);
   }
 
+  function selectionEndOffset(document, selection) {
+    if (selection.isEmpty) {
+      return document.offsetAt(selection.end);
+    }
+    return Math.max(document.offsetAt(selection.start), document.offsetAt(selection.end) - 1);
+  }
+
+  function isInsideTemplateToolkit(text, offset) {
+    var openIndex = text.lastIndexOf('[%', offset);
+    if (openIndex === -1) {
+      return false;
+    }
+    return text.lastIndexOf('%]', offset) < openIndex;
+  }
+
+  function isSelectionInsideTemplateToolkit(document, selection) {
+    var text = document.getText();
+    var startOffset = document.offsetAt(selection.start);
+    var endOffset = selectionEndOffset(document, selection);
+    return isInsideTemplateToolkit(text, startOffset) && isInsideTemplateToolkit(text, endOffset);
+  }
+
+  function selectionLineRange(selection) {
+    var startLine = selection.start.line;
+    var endLine = selection.end.line;
+
+    if (!selection.isEmpty && selection.end.character === 0 && endLine > startLine) {
+      endLine -= 1;
+    }
+
+    return {
+      startLine: startLine,
+      endLine: Math.max(startLine, endLine)
+    };
+  }
+
+  function toggleTemplateToolkitHashComments(editor) {
+    var document = editor.document;
+    var seenLines = Object.create(null);
+    var lineNumbers = [];
+
+    editor.selections.forEach(function (selection) {
+      var lineRange = selectionLineRange(selection);
+      var line;
+
+      for (line = lineRange.startLine; line <= lineRange.endLine; line += 1) {
+        if (seenLines[line]) {
+          continue;
+        }
+        seenLines[line] = true;
+        lineNumbers.push(line);
+      }
+    });
+
+    lineNumbers.sort(function (left, right) {
+      return left - right;
+    });
+
+    if (!lineNumbers.length) {
+      return Promise.resolve();
+    }
+
+    var shouldUncomment = lineNumbers.every(function (lineNumber) {
+      var text = document.lineAt(lineNumber).text;
+      return !text.trim() || /^\s*#(?:\s|$)/.test(text);
+    });
+
+    return editor.edit(function (editBuilder) {
+      lineNumbers.forEach(function (lineNumber) {
+        var line = document.lineAt(lineNumber);
+        var text = line.text;
+        var match = text.match(/^(\s*)# ?/);
+
+        if (!text.trim()) {
+          return;
+        }
+
+        if (shouldUncomment) {
+          if (match) {
+            var start = new vscode.Position(lineNumber, match[1].length);
+            var end = new vscode.Position(lineNumber, match[0].length);
+            editBuilder.delete(new vscode.Range(start, end));
+          }
+          return;
+        }
+
+        editBuilder.insert(new vscode.Position(lineNumber, match ? match[0].length : text.match(/^\s*/)[0].length), match ? '' : '# ');
+      });
+    });
+  }
+
+  function toggleSmartCommentCommand() {
+    var editor = vscode.window.activeTextEditor;
+
+    if (!editor || !editor.document || editor.document.languageId !== 'tpl') {
+      return vscode.commands.executeCommand('editor.action.commentLine');
+    }
+
+    if (editor.selections.every(function (selection) {
+      return isSelectionInsideTemplateToolkit(editor.document, selection);
+    })) {
+      return toggleTemplateToolkitHashComments(editor);
+    }
+
+    return vscode.commands.executeCommand('editor.action.blockComment');
+  }
+
+  function getTemplateVariableRefs(parsed) {
+    if (!parsed || !parsed.templateInfo) {
+      return [];
+    }
+
+    if (parsed.__templateVariableRefsVersion === indexRevision) {
+      return parsed.__templateVariableRefs || [];
+    }
+
+    var knownKeys = index.collectTemplateVariableKeys(parsed.relPath);
+    var keySet = Object.create(null);
+    var refs = [];
+    var seen = Object.create(null);
+    var blockRe = /\[%[\s\S]*?%\]/g;
+    var tokenRe = /(^|[^A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)/g;
+    var blockMatch;
+
+    knownKeys.forEach(function (key) {
+      keySet[key] = true;
+    });
+
+    while ((blockMatch = blockRe.exec(parsed.text)) !== null) {
+      var blockText = blockMatch[0];
+      var blockStart = blockMatch.index;
+      var innerText = blockText.slice(2, -2);
+      var innerBase = blockStart + 2;
+      var tokenMatch;
+
+      if (!innerText || innerText[0] === '#') {
+        continue;
+      }
+
+      while ((tokenMatch = tokenRe.exec(innerText)) !== null) {
+        var key = tokenMatch[2];
+        var tokenStartInInner = tokenMatch.index + tokenMatch[1].length;
+        var previousChar = tokenStartInInner > 0 ? innerText[tokenStartInInner - 1] : '';
+        var refId = '';
+
+        if (!keySet[key] || TT2_KEYWORD_SET[key]) {
+          continue;
+        }
+        if (previousChar === '\'' || previousChar === '"' || previousChar === '$' || previousChar === '#') {
+          continue;
+        }
+
+        refId = key + ':' + (innerBase + tokenStartInInner);
+        if (seen[refId]) {
+          continue;
+        }
+        seen[refId] = true;
+
+        refs.push({
+          key: key,
+          start: innerBase + tokenStartInInner,
+          end: innerBase + tokenStartInInner + key.length
+        });
+      }
+    }
+
+    parsed.__templateVariableRefs = refs;
+    parsed.__templateVariableRefsVersion = indexRevision;
+    return refs;
+  }
+
   function resultsMarkdown(results, includePreview) {
     var markdown = new vscode.MarkdownString('', true);
     var lines = [];
@@ -211,6 +461,7 @@ function activate(context) {
     buildState.building = true;
     buildState.readyPromise = Promise.resolve().then(function () {
       index.rebuild();
+      indexRevision += 1;
       log('Indexed ' + index.fileEntries.length + ' relevant files (' + reason + ').');
       updateVisibleDiagnostics();
     }).catch(function (error) {
@@ -340,6 +591,19 @@ function activate(context) {
       return hit;
     }
 
+    parsed.perlInfo.configVarRefs.forEach(function (configVarRef) {
+      if (offset >= configVarRef.start && offset <= configVarRef.end) {
+        hit = {
+          kind: 'config-var',
+          ref: configVarRef
+        };
+      }
+    });
+
+    if (hit) {
+      return hit;
+    }
+
     parsed.perlInfo.tplVariableWrites.forEach(function (tplVarRef) {
       if (offset >= tplVarRef.start && offset <= tplVarRef.end) {
         hit = {
@@ -354,6 +618,19 @@ function activate(context) {
 
   function findTemplateReferenceAt(parsed, offset) {
     var hit = null;
+
+    parsed.templateInfo.l10nIncludeRefs.forEach(function (l10nIncludeRef) {
+      if (offset >= l10nIncludeRef.start && offset <= l10nIncludeRef.end) {
+        hit = {
+          kind: 'l10n-include',
+          ref: l10nIncludeRef
+        };
+      }
+    });
+
+    if (hit) {
+      return hit;
+    }
 
     parsed.templateInfo.extendsRefs.forEach(function (extendRef) {
       var targetAttr = extendRef.nameAttr || extendRef.addonAttr;
@@ -420,6 +697,23 @@ function activate(context) {
       }
     });
 
+    if (hit) {
+      return hit;
+    }
+
+    getTemplateVariableRefs(parsed).forEach(function (tplVarRef) {
+      if (offset >= tplVarRef.start && offset <= tplVarRef.end) {
+        hit = {
+          kind: 'tpl-var-read',
+          ref: tplVarRef
+        };
+      }
+    });
+
+    if (hit) {
+      return hit;
+    }
+
     return hit;
   }
 
@@ -471,6 +765,10 @@ function activate(context) {
       return index.resolveExtendTargets(hit.ref, parsed.relPath);
     }
 
+    if (hit.kind === 'l10n-include') {
+      return index.resolveL10nFileTargets(hit.ref.name, parsed.relPath, hit.ref.level);
+    }
+
     if (hit.kind === 'l10n') {
       return index.resolveL10nTargets(hit.ref.id, parsed.relPath);
     }
@@ -481,6 +779,14 @@ function activate(context) {
 
     if (hit.kind === 'domain-setup') {
       return index.resolveConfigTargets(hit.ref.key, parsed.relPath);
+    }
+
+    if (hit.kind === 'config-var') {
+      return index.resolveConfigVarTargets(hit.ref.key, parsed.relPath);
+    }
+
+    if (hit.kind === 'tpl-var-read') {
+      return index.resolveTemplateVariableSources(hit.ref.key, parsed.relPath);
     }
 
     if (hit.kind === 'tpl-var-write') {
@@ -543,6 +849,12 @@ function activate(context) {
       return new vscode.Hover(markdown);
     }
 
+    if (hit.kind === 'l10n-include') {
+      markdown.appendMarkdown('**L10n file** `' + hit.ref.name + '`\n\n');
+      markdown.appendMarkdown(resultsMarkdown(targets).value);
+      return new vscode.Hover(markdown);
+    }
+
     if (hit.kind === 'l10n') {
       markdown.appendMarkdown('**L10n** `' + hit.ref.id + '`\n\n');
       markdown.appendMarkdown(resultsMarkdown(targets, true).value);
@@ -557,6 +869,18 @@ function activate(context) {
 
     if (hit.kind === 'domain-setup') {
       markdown.appendMarkdown('**domain.setup** `' + hit.ref.key + '`\n\n');
+      markdown.appendMarkdown(resultsMarkdown(targets, true).value);
+      return new vscode.Hover(markdown);
+    }
+
+    if (hit.kind === 'config-var') {
+      markdown.appendMarkdown('**Config value** `' + hit.ref.key + '`\n\n');
+      markdown.appendMarkdown(resultsMarkdown(targets, true).value);
+      return new vscode.Hover(markdown);
+    }
+
+    if (hit.kind === 'tpl-var-read') {
+      markdown.appendMarkdown('**TPL variable** `' + hit.ref.key + '`\n\n');
       markdown.appendMarkdown(resultsMarkdown(targets, true).value);
       return new vscode.Hover(markdown);
     }
@@ -604,6 +928,9 @@ function activate(context) {
       }
 
       if (parsed.templateInfo) {
+        parsed.templateInfo.l10nIncludeRefs.forEach(function (l10nIncludeRef) {
+          pushSemanticOffsets(document, builder, l10nIncludeRef.start, l10nIncludeRef.end, 'property', ['readonly']);
+        });
         parsed.templateInfo.processRefs.forEach(function (processRef) {
           pushSemanticOffsets(document, builder, processRef.start, processRef.end, 'function', []);
         });
@@ -612,6 +939,9 @@ function activate(context) {
         });
         parsed.templateInfo.domainSetupRefs.forEach(function (setupRef) {
           pushSemanticOffsets(document, builder, setupRef.start, setupRef.end, 'property', ['readonly']);
+        });
+        getTemplateVariableRefs(parsed).forEach(function (tplVarRef) {
+          pushSemanticOffsets(document, builder, tplVarRef.start, tplVarRef.end, 'variable', []);
         });
       }
 
@@ -628,6 +958,9 @@ function activate(context) {
         });
         parsed.perlInfo.tomSetupRefs.forEach(function (setupRef) {
           pushSemanticOffsets(document, builder, setupRef.start, setupRef.end, 'property', ['readonly']);
+        });
+        parsed.perlInfo.configVarRefs.forEach(function (configVarRef) {
+          pushSemanticOffsets(document, builder, configVarRef.start, configVarRef.end, 'property', ['readonly']);
         });
         parsed.perlInfo.tplVariableWrites.forEach(function (tplVarRef) {
           pushSemanticOffsets(document, builder, tplVarRef.start, tplVarRef.end, 'variable', ['declaration']);
@@ -724,6 +1057,20 @@ function activate(context) {
             index.resolveConfigTargets(setupRef.key, parsed.relPath)
           ));
         });
+
+        var templateHintSeen = Object.create(null);
+        getTemplateVariableRefs(parsed).forEach(function (tplVarRef) {
+          if (templateHintSeen[tplVarRef.key]) {
+            return;
+          }
+          templateHintSeen[tplVarRef.key] = true;
+          hints.push(buildHint(
+            document,
+            tplVarRef.end,
+            'TPL variable ' + tplVarRef.key,
+            index.resolveTemplateVariableSources(tplVarRef.key, parsed.relPath)
+          ));
+        });
       }
 
       if (parsed.perlInfo) {
@@ -742,6 +1089,15 @@ function activate(context) {
             setupRef.end,
             '$tom::setup ' + setupRef.key,
             index.resolveConfigTargets(setupRef.key, parsed.relPath)
+          ));
+        });
+
+        parsed.perlInfo.configVarRefs.forEach(function (configVarRef) {
+          hints.push(buildHint(
+            document,
+            configVarRef.end,
+            'Config value ' + configVarRef.key,
+            index.resolveConfigVarTargets(configVarRef.key, parsed.relPath)
           ));
         });
       }
@@ -842,6 +1198,17 @@ function activate(context) {
             positionRangeFromOffsets(document, l10nRef.start, l10nRef.end),
             'L10n key "' + l10nRef.id + '" was not resolved.',
             vscode.DiagnosticSeverity.Information
+          ));
+        }
+      });
+
+      parsed.templateInfo.l10nIncludeRefs.forEach(function (l10nIncludeRef) {
+        var l10nFileTargets = index.resolveL10nFileTargets(l10nIncludeRef.name, parsed.relPath, l10nIncludeRef.level);
+        if (!l10nFileTargets.length) {
+          items.push(new vscode.Diagnostic(
+            positionRangeFromOffsets(document, l10nIncludeRef.start, l10nIncludeRef.end),
+            'L10n file "' + l10nIncludeRef.name + '" was not resolved.',
+            vscode.DiagnosticSeverity.Warning
           ));
         }
       });
@@ -950,6 +1317,14 @@ function activate(context) {
             addLink(attr.start, attr.end, index.resolveTypeAttributeTargets(block, attr.id, parsed.relPath, parsed.perlInfo.callBlocks));
           });
         });
+
+        parsed.perlInfo.tomSetupRefs.forEach(function (setupRef) {
+          addLink(setupRef.start, setupRef.end, index.resolveConfigTargets(setupRef.key, parsed.relPath));
+        });
+
+        parsed.perlInfo.configVarRefs.forEach(function (configVarRef) {
+          addLink(configVarRef.start, configVarRef.end, index.resolveConfigVarTargets(configVarRef.key, parsed.relPath));
+        });
       }
 
       if (parsed.templateInfo) {
@@ -970,8 +1345,20 @@ function activate(context) {
           }
         });
 
+        parsed.templateInfo.l10nIncludeRefs.forEach(function (l10nIncludeRef) {
+          addLink(
+            l10nIncludeRef.start,
+            l10nIncludeRef.end,
+            index.resolveL10nFileTargets(l10nIncludeRef.name, parsed.relPath, l10nIncludeRef.level)
+          );
+        });
+
         parsed.templateInfo.l10nRefs.forEach(function (l10nRef) {
           addLink(l10nRef.start, l10nRef.end, index.resolveL10nTargets(l10nRef.id, parsed.relPath));
+        });
+
+        getTemplateVariableRefs(parsed).forEach(function (tplVarRef) {
+          addLink(tplVarRef.start, tplVarRef.end, index.resolveTemplateVariableSources(tplVarRef.key, parsed.relPath));
         });
       }
 
@@ -1019,17 +1406,17 @@ function activate(context) {
 
       if (incomingKeys.length) {
         lenses.push(new vscode.CodeLens(range, {
-          title: summarizeKeys('module.env: ', incomingKeys)
+          title: summarizeKeys('Cyclone module.env: ', incomingKeys)
         }));
       }
       if (tplVarKeys.length) {
         lenses.push(new vscode.CodeLens(range, {
-          title: summarizeKeys('TPL vars: ', tplVarKeys)
+          title: summarizeKeys('Cyclone TPL vars: ', tplVarKeys)
         }));
       }
       if (setupKeys.length) {
         lenses.push(new vscode.CodeLens(range, {
-          title: summarizeKeys('domain.setup: ', setupKeys)
+          title: summarizeKeys('Cyclone domain.setup: ', setupKeys)
         }));
       }
     }
@@ -1040,12 +1427,12 @@ function activate(context) {
 
       if (perlIncomingKeys.length) {
         lenses.push(new vscode.CodeLens(range, {
-          title: summarizeKeys('incoming env: ', perlIncomingKeys)
+          title: summarizeKeys('Cyclone incoming env: ', perlIncomingKeys)
         }));
       }
       if (outgoingTplVars.length) {
         lenses.push(new vscode.CodeLens(range, {
-          title: summarizeKeys('TPL vars: ', outgoingTplVars)
+          title: summarizeKeys('Cyclone TPL vars: ', outgoingTplVars)
         }));
       }
     }
@@ -1068,6 +1455,9 @@ function activate(context) {
       if (parsed.perlInfo) {
         lenses = lenses.concat(buildBlockOpenLenses(document, parsed, parsed.perlInfo.callBlocks));
       }
+      if (parsed.templateInfo || parsed.perlInfo) {
+        lenses = lenses.concat(buildSummaryLenses(document, parsed));
+      }
 
       return lenses;
     });
@@ -1080,6 +1470,7 @@ function activate(context) {
 
     var parsed = parseCurrentDocument(document);
     var linePrefix = document.lineAt(position.line).text.slice(0, position.character);
+    var offset = document.offsetAt(position);
     var items = [];
 
     if (parsed.templateInfo && /\bPROCESS\s+[A-Za-z0-9_.:-]*$/.test(linePrefix)) {
@@ -1098,6 +1489,48 @@ function activate(context) {
         items.push(item);
       });
       return items;
+    }
+
+    var l10nFileMatch = linePrefix.match(/<L10n\b[^>]*\bname="([^"]*)$/);
+    if (parsed.templateInfo && l10nFileMatch) {
+      return buildPathCompletionItems(
+        position,
+        l10nFileMatch[1],
+        collectPathSuggestions(
+          index.l10nFiles
+            .filter(function (entry) {
+              return entry.relPath.indexOf('/_dsgn/') !== -1 || entry.relPath.indexOf('_dsgn/') === 0;
+            })
+            .map(function (entry) {
+              return entry.baseName.replace(/\.L10n$/i, '');
+            }),
+          l10nFileMatch[1]
+        ),
+        vscode.CompletionItemKind.File,
+        'L10n file'
+      );
+    }
+
+    var tplVarMatch = linePrefix.match(/(?:^|[^A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (parsed.templateInfo && tplVarMatch && isInsideTemplateToolkit(parsed.text, offset)) {
+      return buildPathCompletionItems(
+        position,
+        tplVarMatch[1],
+        collectPathSuggestions(index.collectTemplateVariableKeys(parsed.relPath), tplVarMatch[1]),
+        vscode.CompletionItemKind.Variable,
+        'TPL variable'
+      );
+    }
+
+    var mainKeyMatch = linePrefix.match(/\$?main::key\{\s*["']([^"']*)$/);
+    if ((parsed.typeInfo || parsed.perlInfo || parsed.templateInfo) && mainKeyMatch) {
+      return buildPathCompletionItems(
+        position,
+        mainKeyMatch[1],
+        collectPathSuggestions(index.collectConfKeyNames(parsed.relPath), mainKeyMatch[1]),
+        vscode.CompletionItemKind.Variable,
+        'CONF_KEY name'
+      );
     }
 
     var typeKeyMatch = linePrefix.match(/\bkey="([^"]*)$/);
@@ -1155,6 +1588,17 @@ function activate(context) {
       );
     }
 
+    var perlConfigVarMatch = linePrefix.match(/\$((?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z0-9_:]*)$/);
+    if (parsed.perlInfo && perlConfigVarMatch) {
+      return buildNamespaceCompletionItems(
+        position,
+        perlConfigVarMatch[1],
+        collectNamespaceSuggestions(index.collectConfigVarKeys(parsed.relPath), perlConfigVarMatch[1]),
+        vscode.CompletionItemKind.Property,
+        'Config value'
+      );
+    }
+
     return undefined;
   }
 
@@ -1164,7 +1608,8 @@ function activate(context) {
     vscode.commands.registerCommand('cycloneCmlTools.reindexWorkspace', function () {
       return buildIndex('manual reindex');
     }),
-    vscode.commands.registerCommand('cycloneCmlTools.openResolvedTarget', openResolvedTargetCommand)
+    vscode.commands.registerCommand('cycloneCmlTools.openResolvedTarget', openResolvedTargetCommand),
+    vscode.commands.registerCommand('cycloneCmlTools.toggleSmartComment', toggleSmartCommentCommand)
   );
 
   NAVIGATION_PATTERNS.forEach(function (pattern) {
@@ -1187,9 +1632,12 @@ function activate(context) {
     context.subscriptions.push(vscode.languages.registerDocumentSemanticTokensProvider(selector, {
       provideDocumentSemanticTokens: provideDocumentSemanticTokens
     }, semanticLegend));
-    context.subscriptions.push(vscode.languages.registerCompletionItemProvider(selector, {
-      provideCompletionItems: provideCompletionItems
-    }, '.', '\'', '"'));
+    context.subscriptions.push(vscode.languages.registerCompletionItemProvider.apply(vscode.languages, [
+      selector,
+      {
+        provideCompletionItems: provideCompletionItems
+      }
+    ].concat(COMPLETION_TRIGGER_CHARS)));
   });
 
   CODELENS_PATTERNS.forEach(function (pattern) {
@@ -1201,29 +1649,27 @@ function activate(context) {
     }));
   });
 
-  var watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(rootPath, '**/*'));
-  watcher.onDidCreate(function (uri) {
-    if (resolver.isRelevantFilePath(normalizeRelPath(uri.fsPath)) || /(?:^|\/)(?:master|local)\.conf$/.test(normalizeRelPath(uri.fsPath))) {
+  WATCH_PATTERNS.forEach(function (pattern) {
+    var watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(rootPath, pattern));
+    watcher.onDidCreate(function () {
       scheduleBuild('file created');
-    }
-  });
-  watcher.onDidChange(function (uri) {
-    if (resolver.isRelevantFilePath(normalizeRelPath(uri.fsPath)) || /(?:^|\/)(?:master|local)\.conf$/.test(normalizeRelPath(uri.fsPath))) {
+    });
+    watcher.onDidChange(function () {
       scheduleBuild('file changed');
-    }
-  });
-  watcher.onDidDelete(function (uri) {
-    if (resolver.isRelevantFilePath(normalizeRelPath(uri.fsPath)) || /(?:^|\/)(?:master|local)\.conf$/.test(normalizeRelPath(uri.fsPath))) {
+    });
+    watcher.onDidDelete(function () {
       scheduleBuild('file deleted');
-    }
+    });
+    context.subscriptions.push(watcher);
   });
-  context.subscriptions.push(watcher);
 
   context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(updateDiagnosticsForDocument));
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(function (event) {
+    documentParseCache.delete(event.document.uri.toString());
     updateDiagnosticsForDocument(event.document);
   }));
   context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(function (document) {
+    documentParseCache.delete(document.uri.toString());
     diagnostics.delete(document.uri);
   }));
 

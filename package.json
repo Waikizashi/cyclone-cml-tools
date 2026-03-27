@@ -62,6 +62,7 @@
         "path": "./syntaxes/tpl.tmLanguage.json",
         "embeddedLanguages": {
           "source.js": "javascript",
+          "source.perl": "perl",
           "text.html.basic": "html"
         }
       }
@@ -74,6 +75,18 @@
       {
         "command": "cycloneCmlTools.openResolvedTarget",
         "title": "Cyclone CML: Open Resolved Target"
+      },
+      {
+        "command": "cycloneCmlTools.toggleSmartComment",
+        "title": "Cyclone CML: Toggle Smart Comment"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "cycloneCmlTools.toggleSmartComment",
+        "key": "ctrl+/",
+        "mac": "cmd+/",
+        "when": "editorTextFocus && !editorReadonly && editorLangId == tpl"
       }
     ]
   },

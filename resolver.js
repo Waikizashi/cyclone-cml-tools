@@ -268,12 +268,14 @@ function parseTemplateReferences(text) {
   var headerExtendsRefs = [];
   var processRefs = [];
   var l10nRefs = [];
+  var l10nIncludeRefs = [];
   var tmpTags = [];
   var moduleEnvRefs = [];
   var domainSetupRefs = [];
   var match;
   var entityRe = /<entity\b[^>]*\bid="([^"]+)"/g;
   var extendRe = /<extend\b[^>]*\/?>/g;
+  var l10nIncludeRe = /<L10n\b[^>]*\/?>/g;
   var processRe = /\bPROCESS\s+([A-Za-z0-9_.:-]+)/g;
   var l10nRe = /L10n\.msg\(\s*(["'])([^"']+)\1\s*\)/g;
   var tmpRe = /<!TMP-([A-Z0-9_-]+)!>/g;
@@ -320,6 +322,22 @@ function parseTemplateReferences(text) {
         headerExtendsRefs.push(extendRef);
       }
     }
+  }
+
+  while ((match = l10nIncludeRe.exec(text)) !== null) {
+    var l10nAttrs = parseTagAttributes(match[0], match.index);
+    if (!l10nAttrs.name) {
+      continue;
+    }
+
+    l10nIncludeRefs.push({
+      name: l10nAttrs.name.value,
+      level: l10nAttrs.level ? l10nAttrs.level.value : 'auto',
+      lng: l10nAttrs.lng ? l10nAttrs.lng.value : 'auto',
+      nameAttr: l10nAttrs.name,
+      start: l10nAttrs.name.start,
+      end: l10nAttrs.name.end
+    });
   }
 
   while ((match = processRe.exec(text)) !== null) {
@@ -379,6 +397,7 @@ function parseTemplateReferences(text) {
     headerExtendsRefs: headerExtendsRefs,
     processRefs: processRefs,
     l10nRefs: l10nRefs,
+    l10nIncludeRefs: l10nIncludeRefs,
     tmpTags: tmpTags,
     moduleEnvRefs: uniqueKeyRefs(moduleEnvRefs),
     domainSetupRefs: uniqueKeyRefs(domainSetupRefs)
@@ -864,13 +883,31 @@ function extractBraceKeySegments(chainText, baseOffset) {
   return result;
 }
 
+function normalizeConfigVarKey(baseKey, braceChain) {
+  var key = String(baseKey || '');
+  extractBraceKeySegments(braceChain || '', 0).forEach(function (segment) {
+    key += '.' + segment.value;
+  });
+  return key;
+}
+
+function isDomainSetupKey(key) {
+  return /^tom::setup(?:\.|$)/i.test(String(key || ''));
+}
+
+function isConfigNamespaceKey(key) {
+  return /^(?:tom|TOM|App|pub)::/.test(String(key || ''));
+}
+
 function parsePerlReferences(text) {
   var envRefs = [];
   var tplVariableWrites = [];
   var tomSetupRefs = [];
+  var configVarRefs = [];
   var envRe = /\$env\{\s*(["'])([^"']+)\1\s*\}/g;
   var tplVarRe = /\$TPL(?:->)?\{\s*["']variables["']\s*\}(?:->)?\{\s*["']([^"']+)["']\s*\}/g;
   var tomSetupRe = /\$tom::setup((?:\s*\{\s*["'][^"']+["']\s*\})+)/g;
+  var configVarRe = /(?:\$|@|%)(?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*(?:\s*\{\s*["'][^"']+["']\s*\})*/g;
   var match;
 
   while ((match = envRe.exec(text)) !== null) {
@@ -902,10 +939,32 @@ function parsePerlReferences(text) {
     });
   }
 
+  while ((match = configVarRe.exec(text)) !== null) {
+    var rawValue = match[0];
+    var configVarMatch = rawValue.match(/^([\$@%])((?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*)([\s\S]*)$/);
+    var normalizedKey;
+
+    if (!configVarMatch) {
+      continue;
+    }
+
+    normalizedKey = normalizeConfigVarKey(configVarMatch[2], configVarMatch[3]);
+    if (!isConfigNamespaceKey(normalizedKey) || isDomainSetupKey(normalizedKey)) {
+      continue;
+    }
+
+    configVarRefs.push({
+      key: normalizedKey,
+      start: match.index,
+      end: match.index + rawValue.length
+    });
+  }
+
   return {
     envRefs: uniqueKeyRefs(envRefs),
     tplVariableWrites: uniqueKeyRefs(tplVariableWrites),
     tomSetupRefs: uniqueKeyRefs(tomSetupRefs),
+    configVarRefs: uniqueKeyRefs(configVarRefs),
     callBlocks: parseTomahawkCallBlocks(text)
   };
 }
@@ -971,9 +1030,12 @@ function parseConfigReferences(text) {
   var assignments = [];
   var collected = [];
   var seen = Object.create(null);
+  var configVarAssignments = [];
+  var configVarSeen = Object.create(null);
   var match;
   var directRe = /\$tom::setup((?:\s*\{\s*["'][^"']+["']\s*\})+)\s*=/g;
   var initRe = /%tom::setup\s*=\s*\(/g;
+  var configVarRe = /(?:^|[;{(\n])\s*(?:our\s+)?([\$@%])((?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*)(\s*(?:\{\s*["'][^"']+["']\s*\})*)\s*=/g;
 
   function pushAssignment(item) {
     var key = item.key + ':' + item.start + ':' + item.end;
@@ -984,18 +1046,41 @@ function parseConfigReferences(text) {
     collected.push(item);
   }
 
+  function pushConfigVarAssignment(item) {
+    var key = item.key + ':' + item.start + ':' + item.end;
+    if (configVarSeen[key]) {
+      return;
+    }
+    configVarSeen[key] = true;
+    configVarAssignments.push(item);
+  }
+
   while ((match = directRe.exec(text)) !== null) {
     var segments = extractBraceKeySegments(match[1], match.index + match[0].indexOf(match[1]));
     if (!segments.length) {
       continue;
     }
     var last = segments[segments.length - 1];
+    var valueStart = skipSpaceAndComments(text, match.index + match[0].length, text.length);
     pushAssignment({
       key: segments.map(function (segment) { return segment.value; }).join('.'),
       start: last.start,
       end: last.end,
       preview: previewLine(text, last.start)
     });
+
+    if (text[valueStart] === '{') {
+      var nestedEnd = findMatching(text, valueStart, '{', '}');
+      if (nestedEnd !== -1) {
+        parsePerlHashPairs(
+          text,
+          valueStart + 1,
+          nestedEnd,
+          segments.map(function (segment) { return segment.value; }),
+          assignments
+        );
+      }
+    }
   }
 
   while ((match = initRe.exec(text)) !== null) {
@@ -1012,6 +1097,54 @@ function parseConfigReferences(text) {
     pushAssignment(item);
   });
 
+  while ((match = configVarRe.exec(text)) !== null) {
+    var sigil = match[1];
+    var baseKey = match[2];
+    var braceChain = match[3] || '';
+    var normalizedKey = normalizeConfigVarKey(baseKey, braceChain);
+    var baseKeyStart = match.index + match[0].lastIndexOf(baseKey);
+    var keyStart = baseKeyStart;
+    var keyEnd = baseKeyStart + baseKey.length;
+    var nestedAssignments = [];
+    var valueStart;
+
+    if (!isConfigNamespaceKey(normalizedKey) || isDomainSetupKey(normalizedKey)) {
+      continue;
+    }
+
+    if (braceChain) {
+      var segments = extractBraceKeySegments(braceChain, match.index + match[0].lastIndexOf(braceChain));
+      if (segments.length) {
+        keyStart = segments[segments.length - 1].start;
+        keyEnd = segments[segments.length - 1].end;
+      }
+    }
+
+    pushConfigVarAssignment({
+      key: normalizedKey,
+      start: keyStart,
+      end: keyEnd,
+      preview: previewLine(text, keyStart)
+    });
+
+    valueStart = skipSpaceAndComments(text, match.index + match[0].length, text.length);
+    if (text[valueStart] === '{') {
+      var nestedHashEnd = findMatching(text, valueStart, '{', '}');
+      if (nestedHashEnd !== -1) {
+        parsePerlHashPairs(text, valueStart + 1, nestedHashEnd, [normalizedKey], nestedAssignments);
+      }
+    } else if (text[valueStart] === '(' && sigil === '%') {
+      var nestedParenEnd = findMatching(text, valueStart, '(', ')');
+      if (nestedParenEnd !== -1) {
+        parsePerlHashPairs(text, valueStart + 1, nestedParenEnd, [normalizedKey], nestedAssignments);
+      }
+    }
+
+    nestedAssignments.forEach(function (item) {
+      pushConfigVarAssignment(item);
+    });
+  }
+
   collected.sort(function (left, right) {
     if (left.start !== right.start) {
       return left.start - right.start;
@@ -1027,9 +1160,26 @@ function parseConfigReferences(text) {
     assignmentsByKey[item.key].push(item);
   });
 
+  configVarAssignments.sort(function (left, right) {
+    if (left.start !== right.start) {
+      return left.start - right.start;
+    }
+    return left.key.localeCompare(right.key);
+  });
+
+  var configVarAssignmentsByKey = Object.create(null);
+  configVarAssignments.forEach(function (item) {
+    if (!configVarAssignmentsByKey[item.key]) {
+      configVarAssignmentsByKey[item.key] = [];
+    }
+    configVarAssignmentsByKey[item.key].push(item);
+  });
+
   return {
     assignments: collected,
-    assignmentsByKey: assignmentsByKey
+    assignmentsByKey: assignmentsByKey,
+    configVarAssignments: configVarAssignments,
+    configVarAssignmentsByKey: configVarAssignmentsByKey
   };
 }
 
@@ -1993,6 +2143,45 @@ WorkspaceIndex.prototype.resolveL10nTargets = function resolveL10nTargets(l10nId
   });
 };
 
+WorkspaceIndex.prototype.resolveL10nFileTargets = function resolveL10nFileTargets(l10nName, contextRelPath, level) {
+  var scopeInfo = getScopeInfo(contextRelPath);
+  var roots = getRootsForLevel(scopeInfo, level || 'auto');
+  var candidatePaths = [];
+  var exact;
+  var i;
+
+  for (i = 0; i < roots.length; i += 1) {
+    candidatePaths.push(this._candidatePath(roots[i], '_dsgn', l10nName + '.L10n'));
+  }
+
+  exact = this._resolveExactCandidates(candidatePaths).filter(function (item) {
+    return item.entry.kind === 'l10n';
+  });
+  if (exact.length) {
+    return exact.map(function (item) {
+      return {
+        entry: item.entry,
+        start: 0,
+        end: 0,
+        preview: path.basename(item.entry.relPath),
+        reason: item.reason || 'exact'
+      };
+    });
+  }
+
+  return this._fallbackByPattern(function (entry) {
+    return entry.kind === 'l10n' && entry.baseName === l10nName + '.L10n';
+  }, roots).map(function (item) {
+    return {
+      entry: item.entry,
+      start: 0,
+      end: 0,
+      preview: path.basename(item.entry.relPath),
+      reason: item.reason || 'basename'
+    };
+  });
+};
+
 WorkspaceIndex.prototype.collectScopedL10nIds = function collectScopedL10nIds(contextRelPath) {
   var scopeInfo = getScopeInfo(contextRelPath);
   var roots = getRootsForLevel(scopeInfo, 'auto');
@@ -2128,6 +2317,27 @@ WorkspaceIndex.prototype.collectTemplateVariableKeys = function collectTemplateV
   })).sort();
 };
 
+WorkspaceIndex.prototype.resolveTemplateVariableSources = function resolveTemplateVariableSources(varKey, templateRelPath) {
+  var items = this.templateVarsByTemplateRelPath[normalizeSlashes(templateRelPath)] || [];
+
+  return uniqueFileResults(items.filter(function (item) {
+    return item.key === varKey;
+  }).map(function (item) {
+    return {
+      entry: item.entry,
+      start: item.start,
+      end: item.end,
+      preview: path.basename(item.entry.relPath),
+      reason: 'tpl-var-source'
+    };
+  })).sort(function (left, right) {
+    if (left.entry.relPath !== right.entry.relPath) {
+      return left.entry.relPath.localeCompare(right.entry.relPath);
+    }
+    return (left.start || 0) - (right.start || 0);
+  });
+};
+
 WorkspaceIndex.prototype.collectConfigKeys = function collectConfigKeys(contextRelPath) {
   var keys = [];
   var self = this;
@@ -2138,6 +2348,23 @@ WorkspaceIndex.prototype.collectConfigKeys = function collectConfigKeys(contextR
       return;
     }
     entry.configInfo.assignments.forEach(function (item) {
+      keys.push(item.key);
+    });
+  });
+
+  return uniqueStrings(keys).sort();
+};
+
+WorkspaceIndex.prototype.collectConfigVarKeys = function collectConfigVarKeys(contextRelPath) {
+  var keys = [];
+  var self = this;
+
+  getConfigSearchPaths(contextRelPath).forEach(function (configRelPath) {
+    var entry = self.configEntriesByRelPath[configRelPath];
+    if (!entry || !entry.configInfo) {
+      return;
+    }
+    entry.configInfo.configVarAssignments.forEach(function (item) {
       keys.push(item.key);
     });
   });
@@ -2189,6 +2416,32 @@ WorkspaceIndex.prototype.resolveConfigTargets = function resolveConfigTargets(ke
         end: item.end,
         preview: item.preview,
         reason: 'config'
+      });
+    });
+  });
+
+  return uniqueFileResults(results);
+};
+
+WorkspaceIndex.prototype.resolveConfigVarTargets = function resolveConfigVarTargets(keyPath, contextRelPath) {
+  var results = [];
+  var self = this;
+
+  getConfigSearchPaths(contextRelPath).forEach(function (configRelPath) {
+    var entry = self.configEntriesByRelPath[configRelPath];
+    if (!entry || !entry.configInfo) {
+      return;
+    }
+    (entry.configInfo.configVarAssignmentsByKey[keyPath] || []).forEach(function (item) {
+      results.push({
+        entry: {
+          absPath: entry.absPath,
+          relPath: entry.relPath
+        },
+        start: item.start,
+        end: item.end,
+        preview: item.preview,
+        reason: 'config-var'
       });
     });
   });
